@@ -1,0 +1,465 @@
+#!/bin/zsh
+
+emulate -LR zsh
+setopt ERR_EXIT NO_UNSET PIPE_FAIL
+
+readonly PROGRAM=${0:t}
+readonly CONTAINER_BIN=${CONTAINER_BIN:-/usr/local/bin/container}
+readonly INFRA_ROOT=${AGENTBROWSE_INFRA_ROOT:-${HOME}/Library/Application Support/agentbrowse-infra}
+readonly MARKER=${INFRA_ROOT}/OWNED
+readonly IMAGE_RECEIPT=${INFRA_ROOT}/owned-images
+readonly MARKER_VALUE=agentbrowse-infra-owned-v1
+typeset -ga PROBE_CONTAINERS=()
+
+fail() {
+  print -u2 -r -- "$PROGRAM: $*"
+  return 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: agentbrowse-infra <command> [arguments]
+
+Commands:
+  enable                 Explicitly start the isolated Apple container service
+  pull IMAGE             Pull and record an exact image owned by this session
+  load OCI_ARCHIVE       Load and record images from an OCI archive
+  prove                  Run the bounded Runtime proof (never enables service)
+  status [--json]        Report service, ownership, readiness, and disk use
+  disable                Remove owned resources and stop the service
+
+Environment:
+  CONTAINER_BIN              Apple container executable (default /usr/local/bin/container)
+  AGENTBROWSE_INFRA_ROOT     Machine-local state and application-data root
+EOF
+}
+
+require_host() {
+  [[ $OSTYPE == darwin* ]] || fail "Apple container requires macOS"
+  [[ -x $CONTAINER_BIN ]] || fail "Apple container is not installed at $CONTAINER_BIN"
+}
+
+physical_root() {
+  local parent=${INFRA_ROOT:h}
+  local leaf=${INFRA_ROOT:t}
+  [[ $INFRA_ROOT == /* ]] || fail "AGENTBROWSE_INFRA_ROOT must be absolute"
+  [[ $leaf != . && $leaf != .. ]] || fail "AGENTBROWSE_INFRA_ROOT has an unsafe final component"
+  mkdir -p -- "$parent"
+  print -r -- "$(cd -q -- "$parent" && pwd -P)/$leaf"
+}
+
+validate_removal_root() {
+  local root=$1
+  [[ -n $root && $root == /* ]] || fail "refusing cleanup of a non-absolute root"
+  [[ $root != / && $root != $HOME ]] || fail "refusing cleanup of a broad root"
+  case $root in
+    */agentbrowse-infra|*/agentbrowse-infra-*|*/agentbrowse-infra/*) ;;
+    *) fail "refusing cleanup outside an agentbrowse-infra path: $root" ;;
+  esac
+  [[ -f $root/OWNED ]] || fail "ownership marker is missing from $root"
+  [[ $(<$root/OWNED) == $MARKER_VALUE ]] || fail "ownership marker is invalid in $root"
+}
+
+service_status() {
+  "$CONTAINER_BIN" system status 2>&1 || true
+}
+
+service_running() {
+  [[ $(service_status) == *"apiserver is running"* ]]
+}
+
+service_app_root() {
+  local output=${1:-$(service_status)}
+  local line
+  line=${${(M)${(f)output}:#application data root:*}[1]:-}
+  [[ -n $line ]] || return 1
+  line=${line#application data root: }
+  print -r -- ${line%/}
+}
+
+marker_valid() {
+  [[ -f $MARKER ]] && [[ $(<$MARKER) == $MARKER_VALUE ]]
+}
+
+require_owned_session() {
+  local output actual expected
+  service_running || fail "local infrastructure is disabled; run '$PROGRAM enable' explicitly"
+  marker_valid || fail "the running Apple container service has no agentbrowse-infra ownership marker"
+  output=$(service_status)
+  actual=$(service_app_root "$output") || fail "Apple container did not report its application-data root"
+  expected=$(physical_root)/runtime
+  [[ $actual == $expected ]] || fail "Apple container is using $actual, not the owned root $expected"
+}
+
+append_unique_line() {
+  local file=$1 value=$2
+  [[ $value != *$'\n'* && -n $value ]] || fail "invalid receipt value"
+  if [[ -f $file ]] && grep -Fqx -- "$value" "$file"; then
+    return 0
+  fi
+  print -r -- "$value" >> "$file"
+}
+
+line_is_recorded() {
+  local file=$1 value=$2
+  [[ -f $file ]] && grep -Fqx -- "$value" "$file"
+}
+
+receipt_image_ref() {
+  local ref=$1
+  ref=${ref#docker.io/}
+  ref=${ref#library/}
+  print -r -- "$ref"
+}
+
+container_owned() {
+  local id=$1 inspect
+  inspect=$("$CONTAINER_BIN" inspect "$id" 2>/dev/null) || return 1
+  [[ $inspect == *'"dev.agentbrowse.infra":"true"'* ]] && return 0
+  [[ $inspect == *'"dev.agentbrowse.managed":"true"'* && $inspect == *'"dev.agentbrowse.backend":"apple-container-local"'* ]]
+}
+
+network_owned() {
+  local name=$1 inspect
+  [[ $name == default ]] && return 0
+  inspect=$("$CONTAINER_BIN" network inspect "$name" 2>/dev/null) || return 1
+  [[ $inspect == *'"dev.agentbrowse.infra":"true"'* ]]
+}
+
+collect_blockers() {
+  local id ref name builder_output
+  local container_output image_output network_output volume_output
+  local -a containers images networks volumes found=()
+
+  container_output=$("$CONTAINER_BIN" list --all --quiet) || fail "could not audit containers"
+  image_output=$("$CONTAINER_BIN" image list --quiet) || fail "could not audit images"
+  network_output=$("$CONTAINER_BIN" network list --quiet) || fail "could not audit networks"
+  volume_output=$("$CONTAINER_BIN" volume list --quiet) || fail "could not audit volumes"
+  containers=("${(@f)container_output}")
+  images=("${(@f)image_output}")
+  networks=("${(@f)network_output}")
+  volumes=("${(@f)volume_output}")
+
+  for id in $containers; do
+    [[ -n $id ]] || continue
+    container_owned "$id" || found+=("container:$id")
+  done
+
+  for ref in $images; do
+    [[ -n $ref ]] || continue
+    line_is_recorded "$IMAGE_RECEIPT" "$ref" || found+=("image:$ref")
+  done
+
+  for name in $networks; do
+    [[ -n $name ]] || continue
+    network_owned "$name" || found+=("network:$name")
+  done
+
+  for name in $volumes; do
+    [[ -n $name ]] || continue
+    found+=("volume:$name")
+  done
+
+  if builder_output=$("$CONTAINER_BIN" builder status --quiet 2>&1); then
+    [[ -n $builder_output ]] && found+=("builder:$builder_output")
+  elif [[ $builder_output != *notFound* ]]; then
+    fail "could not audit the image builder: $builder_output"
+  fi
+
+  print -rl -- $found
+}
+
+owned_images_present() {
+  local ref receipt_output
+  local -a refs
+  [[ -f $IMAGE_RECEIPT ]] || return 1
+  receipt_output=$(<$IMAGE_RECEIPT)
+  refs=("${(@f)receipt_output}")
+  for ref in $refs; do
+    [[ -n $ref ]] || continue
+    if "$CONTAINER_BIN" image inspect "$ref" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+enable_session() {
+  require_host
+  local output actual root
+  root=$(physical_root)
+  if service_running; then
+    marker_valid || fail "Apple container is already running outside agentbrowse-infra ownership"
+    output=$(service_status)
+    actual=$(service_app_root "$output") || fail "Apple container did not report its application-data root"
+    [[ $actual == $root/runtime ]] || fail "Apple container is already running with $actual"
+    print -r -- "local infrastructure is already enabled"
+    return 0
+  fi
+
+  if [[ -e $root ]]; then
+    [[ -f $root/OWNED ]] || fail "refusing to reuse unowned state at $root"
+    [[ $(<$root/OWNED) == $MARKER_VALUE ]] || fail "refusing to reuse state with an invalid ownership marker at $root"
+    [[ -f $root/receipt && -f $root/owned-images ]] || fail "refusing to reuse incomplete owned state at $root"
+  else
+    mkdir -p -- "$root"
+    print -r -- "$MARKER_VALUE" > "$root/OWNED"
+    {
+      print -r -- 'schema=1'
+      print -r -- "app_root=$root/runtime"
+      print -r -- "enabled_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$root/receipt"
+    : > "$root/owned-images"
+  fi
+
+  if ! "$CONTAINER_BIN" system start --app-root "$root/runtime" --enable-kernel-install; then
+    print -u2 -r -- "$PROGRAM: Apple container did not start; state is retained for diagnosis"
+    return 1
+  fi
+  require_owned_session
+  print -r -- "local infrastructure enabled"
+}
+
+pull_image() {
+  require_host
+  [[ $# == 1 && -n $1 && $1 != -* ]] || fail "usage: $PROGRAM pull IMAGE"
+  require_owned_session
+  local image=$1 recorded
+  [[ ${image:t} == *:* || $image == *@* ]] || fail "image must use an exact tag or digest: $image"
+  recorded=$(receipt_image_ref "$image")
+  if "$CONTAINER_BIN" image inspect "$image" >/dev/null 2>&1; then
+    line_is_recorded "$IMAGE_RECEIPT" "$recorded" || fail "image already exists without an ownership receipt: $image"
+  else
+    "$CONTAINER_BIN" image pull --platform linux/amd64 "$image"
+    append_unique_line "$IMAGE_RECEIPT" "$recorded"
+  fi
+  print -r -- "owned image ready: $image"
+}
+
+load_archive() {
+  require_host
+  [[ $# == 1 ]] || fail "usage: $PROGRAM load OCI_ARCHIVE"
+  require_owned_session
+  local archive=$1 ref before_output after_output
+  [[ -f $archive ]] || fail "OCI archive does not exist: $archive"
+  local -a before after
+  before_output=$("$CONTAINER_BIN" image list --quiet) || fail "could not audit images before archive load"
+  before=("${(@f)before_output}")
+  "$CONTAINER_BIN" image load --input "$archive"
+  after_output=$("$CONTAINER_BIN" image list --quiet) || fail "could not audit images after archive load"
+  after=("${(@f)after_output}")
+  for ref in $after; do
+    if (( ${before[(Ie)$ref]} == 0 )); then
+      append_unique_line "$IMAGE_RECEIPT" "$ref"
+    elif ! line_is_recorded "$IMAGE_RECEIPT" "$ref"; then
+      fail "archive reused an unowned image reference: $ref"
+    fi
+  done
+  print -r -- "owned images loaded from $archive"
+}
+
+probe_cleanup() {
+  local name inspect
+  for name in $PROBE_CONTAINERS; do
+    inspect=$("$CONTAINER_BIN" inspect "$name" 2>&1) || fail "could not inspect proof container $name: $inspect"
+    [[ $inspect == '[]' ]] && continue
+    if [[ $inspect != *'"dev.agentbrowse.infra":"true"'* || $inspect != *'"dev.agentbrowse.role":"runtime-proof"'* ]]; then
+      fail "refusing to remove colliding unowned probe container: $name"
+    fi
+    "$CONTAINER_BIN" stop --time 2 "$name" >/dev/null 2>&1 || true
+    "$CONTAINER_BIN" delete --force "$name" >/dev/null
+  done
+}
+
+container_ipv4() {
+  local name=$1 inspect address
+  inspect=$("$CONTAINER_BIN" inspect "$name")
+  address=$(print -r -- "$inspect" | /usr/bin/plutil -extract 0.networks.0.ipv4Address raw -o - -)
+  print -r -- ${address%%/*}
+}
+
+prove_runtime() {
+  require_host
+  require_owned_session
+  local image=docker.io/library/python:3.13-alpine
+  local address response facts proof_id tcp_name udp_name
+  proof_id=$$-$RANDOM-$(date +%s)
+  tcp_name=agentbrowse-infra-proof-tcp-$proof_id
+  udp_name=agentbrowse-infra-proof-udp-$proof_id
+  PROBE_CONTAINERS=($tcp_name $udp_name)
+  pull_image "$image" >/dev/null
+  probe_cleanup
+  trap probe_cleanup EXIT INT TERM
+
+  facts=$("$CONTAINER_BIN" run --remove \
+    --name "$tcp_name" \
+    --label dev.agentbrowse.infra=true \
+    --label dev.agentbrowse.role=runtime-proof \
+    --platform linux/amd64 --rosetta --cpus 1 --memory 512M \
+    --tmpfs /dev/shm "$image" \
+    sh -c 'uname -m; grep "^CapEff:" /proc/1/status; df -k /dev/shm | tail -n 1')
+  [[ $facts == x86_64$'\n'* ]] || fail "Rosetta proof failed"
+  [[ $facts != *$'CapEff:\t0000000000000000'* ]] || fail "effective capability proof failed"
+
+  "$CONTAINER_BIN" run --detach \
+    --name "$tcp_name" \
+    --label dev.agentbrowse.infra=true \
+    --label dev.agentbrowse.role=runtime-proof \
+    --platform linux/amd64 --rosetta --cpus 1 --memory 512M \
+    "$image" sh -c 'mkdir -p /www; echo tcp-ok >/www/index.html; exec python3 -m http.server 8080 --bind 0.0.0.0 --directory /www' >/dev/null
+  sleep 1
+  address=$(container_ipv4 "$tcp_name")
+  response=$(curl --silent --show-error --max-time 3 "http://$address:8080/")
+  [[ $response == tcp-ok ]] || fail "direct TCP proof failed"
+  "$CONTAINER_BIN" stop --time 2 "$tcp_name" >/dev/null
+  "$CONTAINER_BIN" delete "$tcp_name" >/dev/null
+
+  "$CONTAINER_BIN" run --detach \
+    --name "$udp_name" \
+    --label dev.agentbrowse.infra=true \
+    --label dev.agentbrowse.role=runtime-proof \
+    --platform linux/amd64 --rosetta --cpus 1 --memory 512M \
+    "$image" python3 -c 'import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("0.0.0.0",9000));data,addr=s.recvfrom(1024);s.sendto(b"udp-ok",addr)' >/dev/null
+  sleep 1
+  address=$(container_ipv4 "$udp_name")
+  response=$(print ping | nc -u -w 3 "$address" 9000)
+  [[ $response == udp-ok ]] || fail "direct UDP proof failed"
+
+  probe_cleanup
+  trap - EXIT INT TERM
+  print -r -- "$facts"
+  print -r -- "direct TCP: ok"
+  print -r -- "direct UDP: ok"
+  print -r -- "runtime proof passed"
+}
+
+json_quote() {
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  print -r -- "\"$value\""
+}
+
+show_status() {
+  require_host
+  [[ $# -le 1 ]] || fail "usage: $PROGRAM status [--json]"
+  local json=false
+  if [[ $# == 1 ]]; then
+    [[ $1 == --json ]] || fail "usage: $PROGRAM status [--json]"
+    json=true
+  fi
+
+  local output state=disabled owned=false actual='' ready=false blockers='' disk='{}'
+  output=$(service_status)
+  if [[ $output == *"apiserver is running"* ]]; then
+    state=running
+    actual=$(service_app_root "$output") || actual='unknown'
+    if marker_valid && [[ $actual == $(physical_root)/runtime ]]; then
+      owned=true
+      blockers=$(collect_blockers)
+      owned_images_present && ready=true
+      disk=$("$CONTAINER_BIN" system df --format json 2>/dev/null || print -r -- '{}')
+    fi
+  fi
+
+  if $json; then
+    local blocker_json='' blocker separator=''
+    for blocker in ${(f)blockers}; do
+      [[ -n $blocker ]] || continue
+      blocker_json+="$separator$(json_quote "$blocker")"
+      separator=,
+    done
+    print -r -- "{\"schemaVersion\":1,\"service\":$(json_quote "$state"),\"owned\":$owned,\"ready\":$ready,\"applicationDataRoot\":$(json_quote "$actual"),\"blockers\":[$blocker_json],\"diskUsage\":$disk}"
+    return 0
+  fi
+
+  print -r -- "service: $state"
+  print -r -- "owned: $owned"
+  print -r -- "ready: $ready"
+  [[ -n $actual ]] && print -r -- "application data root: $actual"
+  if [[ -n $blockers ]]; then
+    print -r -- "cleanup blockers:"
+    print -r -- "$blockers" | sed 's/^/  - /'
+  else
+    print -r -- "cleanup blockers: none"
+  fi
+  if [[ $owned == true ]]; then
+    print -r -- "disk usage:"
+    "$CONTAINER_BIN" system df
+  fi
+}
+
+disable_session() {
+  require_host
+  if ! service_running; then
+    if [[ -e $INFRA_ROOT ]]; then
+      fail "service is stopped but owned state remains; run enable, then disable so resources can be audited"
+    fi
+    print -r -- "local infrastructure is already disabled"
+    return 0
+  fi
+  require_owned_session
+
+  local blockers id ref name root container_output network_output receipt_output
+  blockers=$(collect_blockers)
+  if [[ -n $blockers ]]; then
+    print -u2 -r -- "$PROGRAM: refusing cleanup; unowned resources are present:"
+    print -u2 -r -- "$blockers" | sed 's/^/  - /' >&2
+    return 2
+  fi
+
+  local -a containers networks image_refs
+  container_output=$("$CONTAINER_BIN" list --all --quiet) || fail "could not relist containers during cleanup"
+  containers=("${(@f)container_output}")
+  for id in $containers; do
+    [[ -n $id ]] || continue
+    container_owned "$id" || fail "container ownership changed during cleanup: $id"
+    "$CONTAINER_BIN" stop --time 5 "$id" >/dev/null 2>&1 || true
+    "$CONTAINER_BIN" delete --force "$id"
+  done
+  if [[ -f $IMAGE_RECEIPT ]]; then
+    receipt_output=$(<$IMAGE_RECEIPT)
+    image_refs=("${(@f)receipt_output}")
+    for ref in $image_refs; do
+      [[ -n $ref ]] || continue
+      "$CONTAINER_BIN" image inspect "$ref" >/dev/null 2>&1 || continue
+      "$CONTAINER_BIN" image delete "$ref"
+    done
+  fi
+  network_output=$("$CONTAINER_BIN" network list --quiet) || fail "could not relist networks during cleanup"
+  networks=("${(@f)network_output}")
+  for name in $networks; do
+    [[ -n $name && $name != default ]] || continue
+    network_owned "$name" || fail "network ownership changed during cleanup: $name"
+    "$CONTAINER_BIN" network delete "$name"
+  done
+
+  blockers=$(collect_blockers)
+  [[ -z $blockers ]] || fail "cleanup verification found remaining resources: $blockers"
+  "$CONTAINER_BIN" system stop
+  service_running && fail "Apple container service did not stop"
+
+  root=$(physical_root)
+  validate_removal_root "$root"
+  command rm -rf -- "$root"
+  print -r -- "local infrastructure disabled and owned resources removed"
+}
+
+main() {
+  local command=${1:-}
+  [[ -n $command ]] || { usage; return 2; }
+  shift
+  case $command in
+    enable) [[ $# == 0 ]] || fail "usage: $PROGRAM enable"; enable_session ;;
+    pull) pull_image "$@" ;;
+    load) load_archive "$@" ;;
+    prove) [[ $# == 0 ]] || fail "usage: $PROGRAM prove"; prove_runtime ;;
+    status) show_status "$@" ;;
+    disable) [[ $# == 0 ]] || fail "usage: $PROGRAM disable"; disable_session ;;
+    help|-h|--help) usage ;;
+    *) fail "unknown command: $command"; usage; return 2 ;;
+  esac
+}
+
+main "$@"
