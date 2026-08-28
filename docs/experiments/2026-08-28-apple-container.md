@@ -17,6 +17,7 @@ Network permission remained denied.
 | Built-in Apple builder, amd64 | Failed; worker advertised only arm64 | Do not use `container build --platform linux/amd64`. |
 | amd64 BuildKit container through Rosetta | Passed for a small OCI image | A no-Docker-daemon emergency build path is technically possible. |
 | Exact Kernel/Neko source build | All Dockerfile stages passed; stopped during final OCI export at about 12.3 GiB combined logical usage | Routine enablement should pull from a registry or load an Artbird archive. |
+| Exact published Kernel/Neko image | Passed CDP, Live View HTTP, WebRTC video, control, and input through Direct addresses | The local backend is workload-compatible without port publishing or SSH. |
 
 The successful amd64 builder shape was one disposable
 `moby/buildkit:buildx-stable-1` Apple container with two CPUs, 4 GiB memory,
@@ -40,10 +41,29 @@ that exact empty result as absence and uses a unique, ownership-labeled name on
 each run. A stopped service was also restarted through the explicit `enable`
 path without losing its image receipt.
 
-## Remaining workload proof
+## Published image and Browser-target proof
 
-The exact final image was not loaded because the bounded build was canceled at
-the disk ceiling. Once the exact SHA-tagged image is available from a registry
-or Artbird OCI export, run the Browser-target proof: container start at two CPUs
-and initially 6 GiB memory, CDP on 9222, Live View HTTP on 8080, and direct UDP
-to Neko's configured mux port. Raise memory to 8 GiB only if readiness fails.
+Kernel's existing GitHub Actions workflow publishes `linux/amd64` images to
+Docker Hub. Source commit `57858c774681c646c238043d5cb75a9ff61797c6` was
+available as `onkernel/chromium-headful:57858c7`; its amd64 platform digest was
+`sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3`.
+Pinning the platform digest removes both tag mutability and the need for a
+second registry.
+
+Apple pulled that digest into about 3 GiB of local image storage. The exact
+image started with two CPUs, 6 GiB memory, Rosetta, and `/dev/shm` tmpfs. No
+ports were published. The container discovered its own Direct address before
+executing `/wrapper` and exported that address as `NEKO_WEBRTC_NAT1TO1`; this is
+the required local launch shape because Apple assigns the address at container
+creation time.
+
+At `192.168.64.2`, Live View HTTP and CDP were ready on the first check. CDP
+reported Chrome 152.0.7977.42. Agentbrowse's existing headless native Live View
+client then connected directly to port 8080, opened its data channel, decoded
+and published a 1920×1080 video frame with zero failures, obtained control, and
+sent one mapped pointer packet over WebRTC. macOS Local Network permission
+remained denied throughout.
+
+Targeted disable removed the labeled proof container and digest-pinned image,
+reclaimed 3.51 GiB, stopped Apple services, and removed the marked application
+root. Free disk returned to approximately 55 GiB.

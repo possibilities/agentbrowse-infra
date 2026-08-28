@@ -31,9 +31,10 @@ are deliberately absent from the normal lifecycle. Apple 0.8.0's built-in
 BuildKit worker is arm64-only, but an amd64 BuildKit container can build through
 Rosetta over a private Unix socket. That path built every stage of the exact
 Kernel/Neko image, then crossed the 12 GiB development-box budget during final
-OCI export. The intended production path is therefore a private registry
-populated by the existing image build pipeline. An OCI archive exported by
-Artbird is the offline bootstrap path.
+OCI export. Kernel's existing GitHub Actions pipeline already publishes an
+amd64 Docker Hub image for each source SHA; the intended production path is to
+pin and pull that image's platform digest. An OCI archive exported by Artbird
+remains the offline bootstrap path.
 
 `prove` requires the service to be enabled already. It runs one 512 MiB,
 one-CPU VM at a time and checks amd64 execution through Rosetta, effective
