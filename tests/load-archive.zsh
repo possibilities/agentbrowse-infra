@@ -77,9 +77,13 @@ case "$1 $2" in
   'image delete')
     ref=$3
     grep -Fqx -- "$ref" "$FAKE_IMAGE_STATE" || exit 1
+    print -r -- "$ref" >> "$FAKE_DELETE_LOG"
+    if [[ $FAKE_DELETE_MODE == fail ]]; then
+      print -u2 -r -- 'simulated image delete failure'
+      exit 43
+    fi
     grep -Fvx -- "$ref" "$FAKE_IMAGE_STATE" > "$FAKE_IMAGE_STATE.next" || true
     mv -- "$FAKE_IMAGE_STATE.next" "$FAKE_IMAGE_STATE"
-    print -r -- "$ref" >> "$FAKE_DELETE_LOG"
     ;;
   *) exit 64 ;;
 esac
@@ -96,6 +100,7 @@ run_cli() {
     FAKE_LOAD_LOG=$scratch/load.log \
     FAKE_DELETE_LOG=$scratch/delete.log \
     FAKE_LOAD_MODE=${TEST_LOAD_MODE:-success} \
+    FAKE_DELETE_MODE=${TEST_DELETE_MODE:-success} \
     "$cli" "$@"
 }
 
@@ -127,6 +132,36 @@ grep -Fqx -- "$foreign" "$scratch/images" || fail "partial cleanup removed a pre
   || fail "partial cleanup claimed or changed a pre-existing receipt"
 [[ $(<$scratch/delete.log) == $partial ]] \
   || fail "partial cleanup did not delete exactly the newly created image"
+
+print -r -- "$foreign" > "$scratch/images"
+print -r -- "$foreign" > "$infra_root/owned-images"
+: > "$scratch/delete.log"
+if deferred_output=$(TEST_IMAGE_TAG=$partial TEST_LOAD_MODE=partial-fail TEST_DELETE_MODE=fail run_cli load "$archive" 2>&1); then
+  fail "partially mutating image load with failed cleanup unexpectedly succeeded"
+else
+  deferred_status=$?
+fi
+[[ $deferred_status == 42 ]] \
+  || fail "failed partial cleanup did not preserve the original load exit status"
+[[ $deferred_output == *'simulated partial load failure'* ]] \
+  || fail "failed partial cleanup did not preserve the original load output"
+[[ $deferred_output == *"recorded it for later disable: $partial"* ]] \
+  || fail "failed partial cleanup omitted the deferred ownership warning"
+grep -Fqx -- "$foreign" "$scratch/images" \
+  || fail "failed partial cleanup removed the foreign pre-state"
+grep -Fqx -- "$partial" "$scratch/images" \
+  || fail "failed partial cleanup unexpectedly lost the new image"
+[[ $(grep -Fxc -- "$foreign" "$infra_root/owned-images") == 1 ]] \
+  || fail "failed partial cleanup changed the foreign receipt"
+[[ $(grep -Fxc -- "$partial" "$infra_root/owned-images") == 1 ]] \
+  || fail "failed partial cleanup did not receipt the exact new image"
+while IFS= read -r ref; do
+  [[ -n $ref ]] || continue
+  grep -Fqx -- "$ref" "$infra_root/owned-images" \
+    || fail "failed partial cleanup left an unreceipted image: $ref"
+done < "$scratch/images"
+[[ $(<$scratch/delete.log) == $partial ]] \
+  || fail "failed partial cleanup attempted deletion of the wrong image"
 
 : > "$scratch/images"
 : > "$infra_root/owned-images"

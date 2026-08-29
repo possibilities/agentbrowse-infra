@@ -268,7 +268,7 @@ require_receipted_image_inventory() {
 
 reconcile_new_images() {
   local ref recorded after_output final_output
-  local -a before=("$@") after final unowned=() cleanup_failures=()
+  local -a before=("$@") after final unowned=() ownership_failures=() deferred=()
 
   after_output=$("$CONTAINER_BIN" image list --quiet) \
     || fail "could not audit images after archive load"
@@ -279,7 +279,11 @@ reconcile_new_images() {
     recorded=$(receipt_image_ref "$ref")
     line_is_recorded "$IMAGE_RECEIPT" "$recorded" && continue
     if ! "$CONTAINER_BIN" image delete "$ref"; then
-      cleanup_failures+=("$ref")
+      if append_unique_line "$IMAGE_RECEIPT" "$recorded"; then
+        deferred+=("$ref")
+      else
+        ownership_failures+=("$ref")
+      fi
     fi
   done
 
@@ -292,8 +296,12 @@ reconcile_new_images() {
     recorded=$(receipt_image_ref "$ref")
     line_is_recorded "$IMAGE_RECEIPT" "$recorded" || unowned+=("$ref")
   done
-  (( $#cleanup_failures == 0 )) \
-    || fail "could not remove unreceipted images created by archive load: ${(j:, :)cleanup_failures}"
+  for ref in $deferred; do
+    (( ${final[(Ie)$ref]} != 0 )) || continue
+    print -u2 -r -- "$PROGRAM: warning: could not remove image created by failed archive load; recorded it for later disable: $ref"
+  done
+  (( $#ownership_failures == 0 )) \
+    || fail "could neither remove nor receipt images created by archive load: ${(j:, :)ownership_failures}"
   (( $#unowned == 0 )) \
     || fail "archive load left unreceipted images: ${(j:, :)unowned}"
 }
