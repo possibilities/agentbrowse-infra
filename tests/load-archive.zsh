@@ -13,6 +13,8 @@ readonly archive=$scratch/image.oci.tar
 readonly digest=sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3
 readonly tag=onkernel/chromium-headful:agentbrowse-offline-da9ee68cb9d2
 readonly alias=onkernel/chromium-headful@$digest
+readonly foreign=foreign.example/browser:existing
+readonly partial=onkernel/chromium-headful:partial-load
 
 cleanup() {
   [[ $scratch == /*/agentbrowse-load-test.* ]] || return 1
@@ -30,6 +32,8 @@ print -r -- agentbrowse-infra-owned-v1 > "$infra_root/OWNED"
 : > "$infra_root/owned-images"
 : > "$scratch/images"
 : > "$scratch/tag.log"
+: > "$scratch/load.log"
+: > "$scratch/delete.log"
 print -r -- fixture > "$archive"
 
 cat > "$fake_container" <<'EOF'
@@ -47,8 +51,13 @@ case "$1 $2" in
     cat "$FAKE_IMAGE_STATE"
     ;;
   'image load')
+    print -r -- "$FAKE_IMAGE_TAG" >> "$FAKE_LOAD_LOG"
     grep -Fqx -- "$FAKE_IMAGE_TAG" "$FAKE_IMAGE_STATE" \
       || print -r -- "$FAKE_IMAGE_TAG" >> "$FAKE_IMAGE_STATE"
+    if [[ $FAKE_LOAD_MODE == partial-fail ]]; then
+      print -u2 -r -- 'simulated partial load failure'
+      exit 42
+    fi
     print -r -- "Loaded images: $FAKE_IMAGE_TAG"
     ;;
   'image inspect')
@@ -65,6 +74,13 @@ case "$1 $2" in
     print -r -- "$4" >> "$FAKE_IMAGE_STATE"
     print -r -- "$3 -> $4" >> "$FAKE_TAG_LOG"
     ;;
+  'image delete')
+    ref=$3
+    grep -Fqx -- "$ref" "$FAKE_IMAGE_STATE" || exit 1
+    grep -Fvx -- "$ref" "$FAKE_IMAGE_STATE" > "$FAKE_IMAGE_STATE.next" || true
+    mv -- "$FAKE_IMAGE_STATE.next" "$FAKE_IMAGE_STATE"
+    print -r -- "$ref" >> "$FAKE_DELETE_LOG"
+    ;;
   *) exit 64 ;;
 esac
 EOF
@@ -74,11 +90,48 @@ run_cli() {
   AGENTBROWSE_INFRA_ROOT=$infra_root \
     CONTAINER_BIN=$fake_container \
     FAKE_IMAGE_STATE=$scratch/images \
-    FAKE_IMAGE_TAG=$tag \
+    FAKE_IMAGE_TAG=${TEST_IMAGE_TAG:-$tag} \
     FAKE_IMAGE_DIGEST=$digest \
     FAKE_TAG_LOG=$scratch/tag.log \
+    FAKE_LOAD_LOG=$scratch/load.log \
+    FAKE_DELETE_LOG=$scratch/delete.log \
+    FAKE_LOAD_MODE=${TEST_LOAD_MODE:-success} \
     "$cli" "$@"
 }
+
+print -r -- "$foreign" > "$scratch/images"
+: > "$infra_root/owned-images"
+if foreign_output=$(run_cli load "$archive" 2>&1); then
+  fail "load accepted a pre-existing unreceipted image"
+fi
+[[ $foreign_output == *"pre-existing image lacks an ownership receipt: $foreign"* ]] \
+  || fail "foreign pre-state refusal omitted the exact image"
+[[ ! -s $scratch/load.log ]] || fail "foreign pre-state invoked image load"
+[[ $(<$scratch/images) == $foreign ]] || fail "foreign pre-state was mutated"
+
+print -r -- "$foreign" > "$scratch/images"
+print -r -- "$foreign" > "$infra_root/owned-images"
+: > "$scratch/delete.log"
+if partial_output=$(TEST_IMAGE_TAG=$partial TEST_LOAD_MODE=partial-fail run_cli load "$archive" 2>&1); then
+  fail "partially mutating image load unexpectedly succeeded"
+else
+  partial_status=$?
+fi
+[[ $partial_status == 42 ]] || fail "partial load did not preserve its original exit status"
+[[ $partial_output == *'simulated partial load failure'* ]] \
+  || fail "partial load did not preserve its original failure output"
+grep -Fqx -- "$foreign" "$scratch/images" || fail "partial cleanup removed a pre-existing image"
+[[ $(grep -Fxc -- "$partial" "$scratch/images") == 0 ]] \
+  || fail "partial cleanup left an unreceipted image"
+[[ $(<$infra_root/owned-images) == $foreign ]] \
+  || fail "partial cleanup claimed or changed a pre-existing receipt"
+[[ $(<$scratch/delete.log) == $partial ]] \
+  || fail "partial cleanup did not delete exactly the newly created image"
+
+: > "$scratch/images"
+: > "$infra_root/owned-images"
+: > "$scratch/load.log"
+: > "$scratch/delete.log"
 
 run_cli load "$archive" >/dev/null
 grep -Fqx -- "$tag" "$infra_root/owned-images" \

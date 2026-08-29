@@ -256,29 +256,97 @@ record_loaded_digest_alias() {
   fi
 }
 
+require_receipted_image_inventory() {
+  local ref recorded
+  for ref in "$@"; do
+    [[ -n $ref ]] || continue
+    recorded=$(receipt_image_ref "$ref")
+    line_is_recorded "$IMAGE_RECEIPT" "$recorded" \
+      || fail "refusing archive load; pre-existing image lacks an ownership receipt: $ref"
+  done
+}
+
+reconcile_new_images() {
+  local ref recorded after_output final_output
+  local -a before=("$@") after final unowned=() cleanup_failures=()
+
+  after_output=$("$CONTAINER_BIN" image list --quiet) \
+    || fail "could not audit images after archive load"
+  after=("${(@f)after_output}")
+  for ref in $after; do
+    [[ -n $ref ]] || continue
+    (( ${before[(Ie)$ref]} == 0 )) || continue
+    recorded=$(receipt_image_ref "$ref")
+    line_is_recorded "$IMAGE_RECEIPT" "$recorded" && continue
+    if ! "$CONTAINER_BIN" image delete "$ref"; then
+      cleanup_failures+=("$ref")
+    fi
+  done
+
+  final_output=$("$CONTAINER_BIN" image list --quiet) \
+    || fail "could not verify images after archive-load cleanup"
+  final=("${(@f)final_output}")
+  for ref in $final; do
+    [[ -n $ref ]] || continue
+    (( ${before[(Ie)$ref]} == 0 )) || continue
+    recorded=$(receipt_image_ref "$ref")
+    line_is_recorded "$IMAGE_RECEIPT" "$recorded" || unowned+=("$ref")
+  done
+  (( $#cleanup_failures == 0 )) \
+    || fail "could not remove unreceipted images created by archive load: ${(j:, :)cleanup_failures}"
+  (( $#unowned == 0 )) \
+    || fail "archive load left unreceipted images: ${(j:, :)unowned}"
+}
+
 load_archive() {
   require_host
   [[ $# == 1 ]] || fail "usage: $PROGRAM load OCI_ARCHIVE"
   require_owned_session
-  local archive=$1 ref before_output after_output
+  local archive=$1 ref recorded before_output after_output load_output load_status=0
   [[ -f $archive ]] || fail "OCI archive does not exist: $archive"
   local -a before after loaded=()
   before_output=$("$CONTAINER_BIN" image list --quiet) || fail "could not audit images before archive load"
   before=("${(@f)before_output}")
-  "$CONTAINER_BIN" image load --input "$archive"
+  require_receipted_image_inventory $before
+
+  if load_output=$("$CONTAINER_BIN" image load --input "$archive" 2>&1); then
+    [[ -n $load_output ]] && print -r -- "$load_output"
+  else
+    load_status=$?
+    [[ -n $load_output ]] && print -u2 -r -- "$load_output"
+    reconcile_new_images $before \
+      || print -u2 -r -- "$PROGRAM: archive-load cleanup could not be verified"
+    return $load_status
+  fi
+
   after_output=$("$CONTAINER_BIN" image list --quiet) || fail "could not audit images after archive load"
   after=("${(@f)after_output}")
   for ref in $after; do
     if (( ${before[(Ie)$ref]} == 0 )); then
-      append_unique_line "$IMAGE_RECEIPT" "$ref"
+      recorded=$(receipt_image_ref "$ref")
+      if ! append_unique_line "$IMAGE_RECEIPT" "$recorded"; then
+        reconcile_new_images $before \
+          || print -u2 -r -- "$PROGRAM: archive-load cleanup could not be verified"
+        fail "could not receipt image created by archive load: $ref"
+      fi
       loaded+=("$ref")
-    elif ! line_is_recorded "$IMAGE_RECEIPT" "$ref"; then
+    else
+      recorded=$(receipt_image_ref "$ref")
+    fi
+    if (( ${before[(Ie)$ref]} != 0 )) && ! line_is_recorded "$IMAGE_RECEIPT" "$recorded"; then
+      reconcile_new_images $before \
+        || print -u2 -r -- "$PROGRAM: archive-load cleanup could not be verified"
       fail "archive reused an unowned image reference: $ref"
     fi
   done
   for ref in $loaded; do
-    record_loaded_digest_alias "$ref"
+    if ! record_loaded_digest_alias "$ref"; then
+      reconcile_new_images $before \
+        || print -u2 -r -- "$PROGRAM: archive-load cleanup could not be verified"
+      return 1
+    fi
   done
+  reconcile_new_images $before
   print -r -- "owned images loaded from $archive"
 }
 
