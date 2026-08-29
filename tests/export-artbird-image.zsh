@@ -86,8 +86,15 @@ run_helper() {
     "$helper" "$@"
 }
 
+assert_no_export_workdir() {
+  local -a leftovers
+  leftovers=("$scratch"/.agentbrowse-image-export.*(N))
+  (( $#leftovers == 0 )) || fail "helper left an export work directory: $leftovers"
+}
+
 output=$scratch/browser.oci.tar
 run_helper "$locked_image" "$output" >/dev/null
+assert_no_export_workdir
 [[ -s $output ]] || fail "helper did not publish an archive"
 [[ $(<$context_log) == artbird ]] || fail "helper inspected the wrong Docker context"
 grep -Fqx -- '--context' "$docker_log" || fail "Buildx invocation omitted the Docker context option"
@@ -101,16 +108,19 @@ grep -Fqx -- "FROM $locked_image" "$scratch/Dockerfile.seen" || fail "Dockerfile
 if run_helper docker.io/example/browser:mutable "$scratch/mutable.tar" >/dev/null 2>&1; then
   fail "mutable image reference was accepted"
 fi
+assert_no_export_workdir
 [[ ! -e $scratch/mutable.tar ]] || fail "mutable image refusal left output"
 
 if run_helper "$locked_image" "$output" >/dev/null 2>&1; then
   fail "existing output was overwritten"
 fi
+assert_no_export_workdir
 
 wrong_digest=sha256:$(printf '%064d' 1)
 if run_helper "docker.io/example/browser@$wrong_digest" "$scratch/wrong-digest.tar" >/dev/null 2>&1; then
   fail "archive with a changed manifest digest was accepted"
 fi
+assert_no_export_workdir
 [[ ! -e $scratch/wrong-digest.tar ]] || fail "digest mismatch left output"
 
 print -r -- not-a-tar > "$scratch/not-a-tar"
@@ -122,6 +132,7 @@ if FAKE_OCI_ARCHIVE=$scratch/not-a-tar \
   "$helper" "$locked_image" "$scratch/malformed.tar" >/dev/null 2>&1; then
   fail "malformed archive was accepted"
 fi
+assert_no_export_workdir
 [[ ! -e $scratch/malformed.tar ]] || fail "malformed archive left output"
 
 print -r -- "Artbird export tests passed"

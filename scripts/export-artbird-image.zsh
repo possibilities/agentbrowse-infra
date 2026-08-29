@@ -20,8 +20,9 @@ cleanup() {
     return 1
   }
   rm -rf -- "$work_root"
+  work_root=''
 }
-trap cleanup EXIT INT TERM
+trap cleanup ZERR EXIT INT TERM
 
 usage() {
   cat <<'EOF'
@@ -147,6 +148,7 @@ export_image() {
   print -r -- "archive reference: $archive_ref"
   print -r -- "archive sha256: $archive_sha"
   print -r -- "output: $output"
+  cleanup
 }
 
 if [[ $# == 1 && ( $1 == --help || $1 == -h ) ]]; then
