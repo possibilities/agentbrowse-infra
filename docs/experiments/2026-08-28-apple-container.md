@@ -18,6 +18,7 @@ Network permission remained denied.
 | amd64 BuildKit container through Rosetta | Passed for a small OCI image | A no-Docker-daemon emergency build path is technically possible. |
 | Exact Kernel/Neko source build | All Dockerfile stages passed; stopped during final OCI export at about 12.3 GiB combined logical usage | Routine enablement should pull from a registry or load an Artbird archive. |
 | Exact published Kernel/Neko image | Passed CDP, Live View HTTP, WebRTC video, control, and input through Direct addresses | The local backend is workload-compatible without port publishing or SSH. |
+| Apple OCI save/load | Passed with `alpine:3.22` across a full disable and re-enable | Apple-produced OCI archives round-trip through `load`; an Artbird-produced archive still needs its own compatibility proof. |
 
 The successful amd64 builder shape was one disposable
 `moby/buildkit:buildx-stable-1` Apple container with two CPUs, 4 GiB memory,
@@ -33,6 +34,12 @@ sparse builder disk to roughly 11 GiB before export; deleting the builder
 returned the application-data root to 14 MiB immediately. All five exact probe
 image references were then deleted, the service stopped, and the temporary
 application-data root removed. Free disk returned to approximately 55 GiB.
+
+The offline-path check saved the owned `alpine:3.22` image as an OCI-compatible
+tar archive, disabled the Local infrastructure session completely, re-enabled
+it, loaded the archive through `agentbrowse-infra load`, and verified the image
+was receipt-owned before final cleanup. This proves Apple's archive half of the
+path, not the format emitted by Artbird's Docker Buildx.
 
 Apple 0.8.0 returns `[]` with exit status zero when inspecting a missing
 container name, and a deleted fixed name can remain reserved after a service
