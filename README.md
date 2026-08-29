@@ -76,3 +76,21 @@ AGENTBROWSE_REAL_TESTS=1 tests/real-runtime.zsh
 The real Runtime proof is intentionally opt-in because it changes machine
 state. Its wrapper explicitly enables the service and always disables it in a
 trap; the `prove` command itself still refuses to enable the service.
+
+## Installation
+
+For an editable fleet installation, run:
+
+```sh
+scripts/install.sh --install
+```
+
+The installer verifies this checkout's origin and command ownership, links
+`~/.local/bin/agentbrowse-infra` to the executable here, and records the exact
+deployed commit at `~/.local/state/agentbrowse-infra/deployed-sha`. It refuses
+foreign destinations or receipts. Installation deploys only the command: it
+never starts Apple container services or acquires an image.
+
+Use `scripts/install.sh --uninstall` to remove a corroborated command link and
+receipt. Uninstallation does not alter Local infrastructure session state; use
+the explicit `agentbrowse-infra disable` lifecycle command for that.
