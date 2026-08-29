@@ -30,14 +30,21 @@ bin/agentbrowse-infra disable
 
 The final `inspect` is the compatibility gate: Apple must address the loaded
 content by the same locked digest. Always finish with `disable`, which removes
-the receipt-owned loaded image and stops Apple services.
+the receipt-owned archive tag and digest alias and stops Apple services. The
+`load` command creates that alias from the loaded image's inspected platform
+digest; it never contacts a registry.
 
-## Current proof boundary
+## Runtime proof
 
-Apple container 0.8.0 has already completed a save, full disable, re-enable,
-load, and cleanup round-trip for a small OCI archive. The Artbird-produced
-archive round-trip remains pending because SSH to Artbird timed out on
-2026-08-28 and again on 2026-08-29. The helper's command construction and OCI
-validation are covered hermetically, but do not claim the offline bootstrap as
-runtime-proved until the commands above succeed with Artbird online and the
-locked Kernel image.
+The complete locked-image round-trip passed on 2026-08-29 with Artbird online.
+Buildx exported the exact manifest
+`sha256:da9ee68cb9d2de0b3c26885ff3bdcf04c944254a36eb127219028ac017ff56f3`
+as a 930-MiB OCI archive whose SHA-256 was
+`b841f21e910e40211468b5e728f8782c76bf5bc49731259133139b823d7e15e2`.
+Apple container 0.8.0 loaded it, `agentbrowse-infra load` created the
+digest-addressable alias without a pull, and digest inspection succeeded.
+Agentbrowse then started the Browser workload from that alias with 2 CPUs and
+6 GiB, and Direct CDP plus Live View HTTP both answered at `192.168.64.2`.
+Provider cleanup removed the target; `disable` removed both image references,
+reclaimed 3.5 GB, stopped/unregistered Apple services, and removed the owned
+application root.

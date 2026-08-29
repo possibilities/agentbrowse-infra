@@ -60,7 +60,7 @@ validate_oci_archive() {
   local archive=$1 expected_digest=$2 expected_ref=$3 validation=$4
   local layout=$validation/oci-layout index=$validation/index.json list=$validation/archive.list
   local manifest=$validation/manifest.json config=$validation/config.json layer=$validation/layer
-  local version schema manifest_digest os arch compact config_digest layer_digest
+  local version schema manifest_digest os arch compact archive_tag config_digest layer_digest
   local layer_index=0
 
   [[ -s $archive && ! -L $archive ]] || fail "Buildx did not create a regular nonempty archive"
@@ -83,7 +83,11 @@ validate_oci_archive() {
   arch=$(/usr/bin/plutil -extract manifests.0.platform.architecture raw -o - -- "$index" 2>/dev/null) || fail "archive manifest omits its architecture"
   [[ $os == linux && $arch == amd64 ]] || fail "archive platform is $os/$arch, not linux/amd64"
   compact=$(tr -d '[:space:]' < "$index")
-  [[ $compact == *\"org.opencontainers.image.ref.name\":\"$expected_ref\"* ]] || fail "archive index omits the expected image reference: $expected_ref"
+  archive_tag=${expected_ref##*:}
+  [[ $compact == *\"io.containerd.image.name\":\"$expected_ref\"* ]] || \
+    fail "archive index omits the expected containerd image name: $expected_ref"
+  [[ $compact == *\"org.opencontainers.image.ref.name\":\"$archive_tag\"* ]] || \
+    fail "archive index omits the expected OCI reference name: $archive_tag"
 
   verify_blob "$archive" "$list" "$manifest_digest" "$manifest"
   config_digest=$(/usr/bin/plutil -extract config.digest raw -o - -- "$manifest" 2>/dev/null) || fail "image manifest omits its config digest"

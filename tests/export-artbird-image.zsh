@@ -42,7 +42,7 @@ make_fixture() {
   manifest_digest=$(blob_digest "$content/manifest.json")
   archive_ref=docker.io/example/browser:agentbrowse-offline-${${manifest_digest#sha256:}[1,12]}
   print -nr -- '{"imageLayoutVersion":"1.0.0"}' > "$layout/oci-layout"
-  print -nr -- '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"'$manifest_digest'","size":'$(blob_size "$content/manifest.json")',"platform":{"architecture":"amd64","os":"linux"},"annotations":{"org.opencontainers.image.ref.name":"'$archive_ref'"}}]}' > "$layout/index.json"
+  print -nr -- '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"'$manifest_digest'","size":'$(blob_size "$content/manifest.json")',"platform":{"architecture":"amd64","os":"linux"},"annotations":{"io.containerd.image.name":"'$archive_ref'","org.opencontainers.image.ref.name":"'${archive_ref##*:}'"}}]}' > "$layout/index.json"
   cp "$content/config.json" "$layout/blobs/sha256/${config_digest#sha256:}"
   cp "$content/layer.tar" "$layout/blobs/sha256/${layer_digest#sha256:}"
   cp "$content/manifest.json" "$layout/blobs/sha256/${manifest_digest#sha256:}"

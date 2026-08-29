@@ -41,8 +41,9 @@ Maintainers can create the offline archive with
 helper accepts only a full locked digest, exports only `linux/amd64` through
 Artbird Buildx, and validates that the OCI archive preserves the locked manifest
 digest before publishing it. See [the export and Apple-load
-runbook](docs/artbird-image-export.md), including its current live-proof
-boundary.
+runbook](docs/artbird-image-export.md). `load` receipts the archive tag and
+creates a receipt-owned digest alias from the inspected platform manifest, so
+agentbrowse can use the same locked runtime reference after an offline load.
 
 `prove` requires the service to be enabled already. It runs one 512 MiB,
 one-CPU VM at a time and checks amd64 execution through Rosetta, effective

@@ -236,13 +236,33 @@ pull_image() {
   print -r -- "owned image ready: $image"
 }
 
+record_loaded_digest_alias() {
+  local ref=$1 inspect digest repository alias recorded
+  [[ $ref != *@* ]] || return 0
+  inspect=$("$CONTAINER_BIN" image inspect "$ref") || fail "could not inspect loaded image: $ref"
+  digest=$(print -r -- "$inspect" | /usr/bin/plutil -extract 0.index.digest raw -o - - 2>/dev/null) \
+    || fail "loaded image does not report its platform digest: $ref"
+  [[ $digest =~ '^sha256:[0-9a-f]{64}$' ]] || fail "loaded image reports an invalid platform digest: $ref"
+  repository=${ref%:*}
+  [[ $repository != $ref ]] || fail "loaded image reference has no tag: $ref"
+  alias=$repository@$digest
+  recorded=$(receipt_image_ref "$alias")
+  if "$CONTAINER_BIN" image inspect "$alias" >/dev/null 2>&1; then
+    line_is_recorded "$IMAGE_RECEIPT" "$recorded" \
+      || fail "loaded image digest alias already exists without an ownership receipt: $alias"
+  else
+    "$CONTAINER_BIN" image tag "$ref" "$alias"
+    append_unique_line "$IMAGE_RECEIPT" "$recorded"
+  fi
+}
+
 load_archive() {
   require_host
   [[ $# == 1 ]] || fail "usage: $PROGRAM load OCI_ARCHIVE"
   require_owned_session
   local archive=$1 ref before_output after_output
   [[ -f $archive ]] || fail "OCI archive does not exist: $archive"
-  local -a before after
+  local -a before after loaded=()
   before_output=$("$CONTAINER_BIN" image list --quiet) || fail "could not audit images before archive load"
   before=("${(@f)before_output}")
   "$CONTAINER_BIN" image load --input "$archive"
@@ -251,9 +271,13 @@ load_archive() {
   for ref in $after; do
     if (( ${before[(Ie)$ref]} == 0 )); then
       append_unique_line "$IMAGE_RECEIPT" "$ref"
+      loaded+=("$ref")
     elif ! line_is_recorded "$IMAGE_RECEIPT" "$ref"; then
       fail "archive reused an unowned image reference: $ref"
     fi
+  done
+  for ref in $loaded; do
+    record_loaded_digest_alias "$ref"
   done
   print -r -- "owned images loaded from $archive"
 }

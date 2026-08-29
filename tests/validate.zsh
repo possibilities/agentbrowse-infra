@@ -14,6 +14,7 @@ zsh -n "$repo_root/tests/real-runtime.zsh"
 zsh -n "$repo_root/tests/install.zsh"
 zsh -n "$artbird_export"
 zsh -n "$repo_root/tests/export-artbird-image.zsh"
+zsh -n "$repo_root/tests/load-archive.zsh"
 [[ -x $cli ]] || {
   print -u2 -r -- "not executable: $cli"
   return 1
@@ -32,6 +33,10 @@ zsh -n "$repo_root/tests/export-artbird-image.zsh"
 }
 [[ -x $repo_root/tests/export-artbird-image.zsh ]] || {
   print -u2 -r -- "not executable: $repo_root/tests/export-artbird-image.zsh"
+  return 1
+}
+[[ -x $repo_root/tests/load-archive.zsh ]] || {
+  print -u2 -r -- "not executable: $repo_root/tests/load-archive.zsh"
   return 1
 }
 [[ -x $repo_root/tests/real-runtime.zsh ]] || {
@@ -53,5 +58,6 @@ grep -Fq -- 'refusing cleanup' "$cli"
 
 "$repo_root/tests/install.zsh"
 "$repo_root/tests/export-artbird-image.zsh"
+"$repo_root/tests/load-archive.zsh"
 
 print -r -- "validation passed"
