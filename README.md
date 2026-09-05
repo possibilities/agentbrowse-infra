@@ -67,9 +67,7 @@ root. It never invokes a global prune operation.
 ## Readiness versus enablement
 
 An enabled service is not necessarily ready for agentbrowse. `status` reports
-`ready: true` only after at least one receipt-owned image is present. The later
-agentbrowse integration will additionally require its configured exact image
-before selecting this backend.
+`ready: true` only after at least one receipt-owned image is present. Agentbrowse additionally requires its configured exact image before launching a target.
 
 Use `status --json` for a stable machine-readable document. Configuration must
 list the remote backend first and this local backend second; probing that list
@@ -103,3 +101,28 @@ never starts Apple container services or acquires an image.
 Use `scripts/install.sh --uninstall` to remove a corroborated command link and
 receipt. Uninstallation does not alter Local infrastructure session state; use
 the explicit `agentbrowse-infra disable` lifecycle command for that.
+
+## Hypeman
+
+`agentbrowse-infra hypeman setup|enable|status|disable` manages an independent Hypeman runtime. `pull IMAGE` explicitly prepares an OCI image. Setup verifies pinned release archives and installs no resident startup job; enable starts the service explicitly. Disable stops owned instances and preserves all profile data.
+
+On macOS the service uses `~/.local/share/ab-hypeman` to keep Unix socket paths short. Install Caddy and e2fsprogs first. Its system-Python supervisor relays owned guest CDP, Live View, and UDP endpoints through loopback. Setup detects the active Apple network when choosing a VZ subnet; `setup --subnet CIDR` explicitly changes that setting for the next service start.
+
+The adjacent artbird repository's optional `ansible/playbooks/hypeman.yml` installs the same lifecycle helper and the Linux prerequisites. The helper owns an exact nftables table for private CDP and WebRTC forwarding; it never prunes Docker resources.
+
+See `../agentbrowse/docs/hypeman.md` for the four-backend demo and configuration contract. Run `/usr/bin/python3 tests/hypeman.py` for hermetic TCP/UDP forwarding checks.
+
+## Preserve profiles when stopping Apple container
+
+`agentbrowse-infra stop` audits container ownership and stops the service while
+preserving images, profiles and receipts. Use `enable` to start it again.
+`disable` retains its stricter, destructive cleanup contract and refuses volumes.
+
+When a client cannot access private VM addresses, explicitly run
+`agentbrowse-infra relay enable` and configure the Apple backend with
+`"accessMode": "loopback"`. The system-Python relay exposes CDP on
+`127.0.0.1:9222+slot` and Live View HTTP on `127.0.0.1:18080+slot`; WebRTC
+continues to use the guest's Direct address. It checks the owned service root
+and browser labels on every reconciliation. `relay disable`, `stop` and
+`disable` stop forwarding. Run `relay enable` again after restarting the service.
+Neither relay starts a VM, changes macOS privacy settings, nor installs a login job.

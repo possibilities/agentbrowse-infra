@@ -4,6 +4,7 @@ emulate -LR zsh
 setopt ERR_EXIT NO_UNSET PIPE_FAIL
 
 readonly PROGRAM=${0:t}
+readonly SCRIPT_DIR=${0:A:h}
 readonly CONTAINER_BIN=${CONTAINER_BIN:-/usr/local/bin/container}
 readonly INFRA_ROOT=${AGENTBROWSE_INFRA_ROOT:-${HOME}/Library/Application Support/agentbrowse-infra}
 readonly MARKER=${INFRA_ROOT}/OWNED
@@ -21,11 +22,14 @@ usage() {
 Usage: agentbrowse-infra <command> [arguments]
 
 Commands:
+  hypeman COMMAND        Manage the optional local Hypeman runtime
+  relay enable|disable   Explicitly control Apple loopback TCP access
   enable                 Explicitly start the isolated Apple container service
   pull IMAGE             Pull and record an exact image owned by this session
   load OCI_ARCHIVE       Load and record images from an OCI archive
   prove                  Run the bounded Runtime proof (never enables service)
   status [--json]        Report service, ownership, readiness, and disk use
+  stop                   Stop the owned service and preserve images and profiles
   disable                Remove owned resources and stop the service
 
 Environment:
@@ -537,6 +541,7 @@ disable_session() {
 
   blockers=$(collect_blockers)
   [[ -z $blockers ]] || fail "cleanup verification found remaining resources: $blockers"
+  [[ ! -f $INFRA_ROOT/relay.plist ]] || /usr/bin/python3 "$SCRIPT_DIR/apple-relay.py" disable
   "$CONTAINER_BIN" system stop
   service_running && fail "Apple container service did not stop"
 
@@ -555,7 +560,22 @@ main() {
     pull) pull_image "$@" ;;
     load) load_archive "$@" ;;
     prove) [[ $# == 0 ]] || fail "usage: $PROGRAM prove"; prove_runtime ;;
+    hypeman) exec "$SCRIPT_DIR/agentbrowse-hypeman" "$@" ;;
+    relay) exec /usr/bin/python3 "$SCRIPT_DIR/apple-relay.py" "$@" ;;
     status) show_status "$@" ;;
+    stop)
+      [[ $# == 0 ]] || fail "usage: $PROGRAM stop"
+      require_owned_session
+      local container_output id
+      container_output=$("$CONTAINER_BIN" list --all --quiet) || fail "could not audit containers"
+      for id in ${(f)container_output}; do
+        [[ -n $id ]] || continue
+        container_owned "$id" || fail "foreign container prevents stopping the owned runtime: $id"
+      done
+      [[ ! -f $INFRA_ROOT/relay.plist ]] || /usr/bin/python3 "$SCRIPT_DIR/apple-relay.py" disable
+      "$CONTAINER_BIN" system stop
+      print -r -- "local infrastructure stopped; images and profiles preserved"
+      ;;
     disable) [[ $# == 0 ]] || fail "usage: $PROGRAM disable"; disable_session ;;
     help|-h|--help) usage ;;
     *) fail "unknown command: $command"; usage; return 2 ;;

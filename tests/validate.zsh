@@ -45,7 +45,7 @@ zsh -n "$repo_root/tests/load-archive.zsh"
 }
 
 help=$($cli --help)
-for command in enable pull load prove status disable; do
+for command in enable pull load prove status stop disable hypeman relay; do
   [[ $help == *"$command"* ]] || {
     print -u2 -r -- "help omits $command"
     return 1
@@ -59,5 +59,7 @@ grep -Fq -- 'refusing cleanup' "$cli"
 "$repo_root/tests/install.zsh"
 "$repo_root/tests/export-artbird-image.zsh"
 "$repo_root/tests/load-archive.zsh"
+
+/usr/bin/python3 "$repo_root/tests/hypeman.py"
 
 print -r -- "validation passed"
